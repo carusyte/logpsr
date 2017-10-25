@@ -11,19 +11,42 @@ import (
 	"gonum.org/v1/plot/plotutil"
 	"gonum.org/v1/plot/plotter"
 	"gonum.org/v1/plot/vg"
+	"io"
+	"time"
+)
+
+type FileType string
+
+const (
+	GATEWAY  FileType = "gateway"
+	UC_AS_T2 FileType = "ucas_t2"
 )
 
 func main() {
-	f := "/Users/jx/Downloads/ctcs-gateway.log.2017-10-23"
-	tc, e := ParseFile(f)
-	if e != nil {
-		log.Panicln(e)
+	start, end := "14:00:00", "18:18:00"
+	fmap := map[FileType]string{
+		//GATEWAY:  "/Users/jx/Downloads/ctcs-gateway.log.2017-10-20",
+		UC_AS_T2: "/Users/jx/Downloads/ucas.log.1020/t2traces.log.2017-10-20",
 	}
-	tc.Chop("14:00:00", "18:18:00")
-	graph("points_1023.png", tc)
+	tcs := make([]*TsCounter, 0, 16)
+	for n, f := range fmap {
+		log.Printf("parsing file %s", f)
+		tc, nlns, e := ParseFile(n, f, start, end)
+		log.Printf("%+v lines parsed: %d", f, nlns)
+		if e != nil {
+			log.Panicln(e)
+		}
+		tc.Even(start, end)
+		tc.OrderByTime()
+		tcs = append(tcs, tc)
+	}
+
+	graph("points_1020.png", tcs...)
 }
 
 func graph(dstFile string, tcs ... *TsCounter) {
+	log.Printf("generating plot graph...")
+
 	p, err := plot.New()
 	if err != nil {
 		panic(err)
@@ -64,34 +87,79 @@ func graph(dstFile string, tcs ... *TsCounter) {
 	}
 }
 
-func ParseFile(filePath string) (tc *TsCounter, e error) {
-	lns, e := ParseLines(filePath)
-	if e != nil {
-		return nil, e
+func ParseFile(ftype FileType, filePath, start, end string) (tc *TsCounter, nlines int, e error) {
+	inclSt, inclEd := true, true
+	if strings.HasPrefix(start, "(") {
+		inclSt = false
+		start = start[1:]
 	}
-	var ftype string
-	if strings.HasPrefix(filePath, "ctcs-gateway.log") {
-		ftype = "gateway"
+	if strings.HasSuffix(end, ")") {
+		inclEd = false
+		end = end[:len(end)-1]
 	}
-	log.Printf("%s lines: %d", ftype, len(lns))
+
 	tc = new(TsCounter)
-	tc.Name = ftype
-	//{"server":"nftgateway.qme.com","remote_addr":"139.199.43.247",
-	// "timestamp":"2017-Oct-20 00:00:13.000",
-	// "method":"HEAD","request_uri":"/","protocol":"HTTP/1.1","status":"200","body_bytes_sent":"0","latency":1,"response":{"org.eclipse.jetty.server.welcome":"index.html"}}
-	rex := regexp.MustCompile(`"timestamp":".{12}(.{8}).{4}",`)
-	for _, ln := range lns {
-		r := rex.FindStringSubmatch(ln)
-		if len(r) > 0 {
-			tc.Add(r[len(r)-1])
-		}
+	tc.Name = string(ftype)
+	tag := ""
+	switch ftype {
+	case GATEWAY:
+		tag = `"timestamp":".{12}(.{8}).{4}",`
+	case UC_AS_T2:
+		tag = `.{11}(.{8}),.*current funtionId:306122, parsing request parameters`
 	}
-	//ts, cs := tc.OrderByTime()
-	//for i, _ := range ts {
-	//	fmt.Printf("%s\t%d", ts[i], cs[i])
-	//	fmt.Println()
-	//}
-	return tc, nil
+	rex := regexp.MustCompile(tag)
+
+	inputFile, err := os.Open(filePath)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer inputFile.Close()
+
+	rd := bufio.NewReader(inputFile)
+	s, e := Readln(rd)
+	for e == nil {
+		nlines++
+		r := rex.FindStringSubmatch(s)
+		if len(r) > 0 {
+			timeVal := r[len(r)-1]
+			if start != "" {
+				if inclSt {
+					if start <= timeVal {
+						tc.Add(timeVal)
+					}
+				} else {
+					if start < timeVal {
+						tc.Add(timeVal)
+					}
+				}
+			} else {
+				tc.Add(timeVal)
+			}
+			if end != "" {
+				if inclEd {
+					if timeVal <= end {
+						tc.Add(timeVal)
+					} else {
+						break
+					}
+				} else {
+					if timeVal < end {
+						tc.Add(timeVal)
+					} else {
+						break
+					}
+				}
+			} else {
+				tc.Add(timeVal)
+			}
+		}
+		s, e = Readln(rd)
+	}
+	if e != nil && e != io.EOF {
+		return nil, 0, e
+	}
+
+	return
 }
 
 func ParseLines(filePath string) ([]string, error) {
@@ -101,15 +169,34 @@ func ParseLines(filePath string) ([]string, error) {
 	}
 	defer inputFile.Close()
 
-	scanner := bufio.NewScanner(inputFile)
+	rd := bufio.NewReader(inputFile)
 	var results []string
-	for scanner.Scan() {
-		results = append(results, scanner.Text())
+	s, e := Readln(rd)
+	for e == nil {
+		results = append(results, s)
+		s, e = Readln(rd)
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
+	if e != nil && e != io.EOF {
+		return nil, e
 	}
 	return results, nil
+}
+
+// Readln returns a single line (without the ending \n)
+// from the input buffered reader.
+// An error is returned iff there is an error with the
+// buffered reader.
+func Readln(r *bufio.Reader) (string, error) {
+	var (
+		isPrefix       = true
+		err      error = nil
+		line, ln []byte
+	)
+	for isPrefix && err == nil {
+		line, isPrefix, err = r.ReadLine()
+		ln = append(ln, line...)
+	}
+	return string(ln), err
 }
 
 type TsCounter struct {
@@ -130,6 +217,42 @@ func (tc *TsCounter) Add(timeStamp string) {
 	} else {
 		tc.Counter[timeStamp] = 1
 		tc.Timestamps = append(tc.Timestamps, timeStamp)
+	}
+}
+
+func (tc *TsCounter) Even(start, end string) {
+	inclSt, inclEd := true, true
+	tf := "00:00:00"
+	if strings.HasPrefix(start, "(") {
+		inclSt = false
+		start = start[1:]
+	}
+	if strings.HasSuffix(end, ")") {
+		inclEd = false
+		end = end[:len(end)-1]
+	}
+
+	st, e := time.Parse(tf, start)
+	if e != nil {
+		log.Panicln(e)
+	}
+	et, e := time.Parse(tf, end)
+	if e != nil {
+		log.Panicln(e)
+	}
+	if !inclSt {
+		st.Add(time.Second)
+	}
+	if !inclEd {
+		et.Add(-time.Second)
+	}
+	for st.Before(et) {
+		t := st.Format(tf)
+		if _, ok := tc.Counter[t]; !ok {
+			tc.Counter[t] = 0
+			tc.Timestamps = append(tc.Timestamps, t)
+		}
+		st.Add(time.Second)
 	}
 }
 
