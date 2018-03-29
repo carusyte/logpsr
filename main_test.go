@@ -11,10 +11,12 @@ func TestParseGatewayLogEntry(t *testing.T) {
 		`"timestamp":"2017-Oct-20 00:07:38.001","method":"HEAD","request_uri":"/",` +
 		`"protocol":"HTTP/1.1","status":"200","body_bytes_sent":"0","latency":0,"response":` +
 		`{"org.eclipse.jetty.server.welcome":"index.html"}}`
-	rex := regexp.MustCompile(`"timestamp":".{12}(.{8}).{4}",`)
+	rex := regexp.MustCompile(`"timestamp":".{12}(.{8}).*"latency":(\d*),"`)
 	//rex := regexp.MustCompile(`"timestamp":"([^"]*)",`)
 	r := rex.FindStringSubmatch(ln)
 	fmt.Println(r)
+	fmt.Printf("timestamp: %s\n", r[len(r)-2])
+	fmt.Printf("latency: %s", r[len(r)-1])
 }
 
 func TestParseUcasLogEntry(t *testing.T) {
